@@ -2,6 +2,9 @@
 ;; non-terminal form: one entry per line, sorted, entries beginning with a
 ;; period omitted.
 ;;
+;;   ls DIR       the visible entries
+;;   ls -a DIR    every entry, including `.` and `..`
+;;
 ;; Capabilities: :cli/args (38) for the operand, :fs/browse (34) for the
 ;; listing, :io/write (37) to answer. The browse scope is baked into the
 ;; packaged binary, so `./ls` lists exactly the tree it was packaged for.
@@ -47,6 +50,47 @@ b" 1 2))
 ;; `string-index-of` answers the first BYTE OFFSET of the needle, so an
 ;; answer of 0 is exactly "begins with", and it never constructs an offset it
 ;; has not walked to. A name with no period at all answers -1.
+;; --- byte order, for -a --------------------------------------------------
+;;
+;; This file used to record `-a` as blocked: wire 34 excludes `.` and `..`,
+;; adding them is not a prepend -- `LC_ALL=C ls -a` puts `-dash` BEFORE `.`
+;; -- and the language has no string ordering comparison to merge with.
+;;
+;; The last clause was wrong, and org-ieee-sort is where that turned up. UTF-8
+;; preserves code point order lexicographically, so walking both strings with
+;; `string-code-point-at` and comparing code points IS byte order. No
+;; primitive, no language change: ordinary guest code, ported from there.
+
+(defn cp-width [c :i64] :i64
+  (if (< c 128) 1 (if (< c 2048) 2 (if (< c 65536) 3 4))))
+
+(defn less-from [a :string b :string i :i64 j :i64] :bool
+  (if (>= i (string-byte-length a))
+    (if (>= j (string-byte-length b)) false true)
+    (if (>= j (string-byte-length b))
+      false
+      (let [ca (string-code-point-at a i)
+            cb (string-code-point-at b j)]
+        (if (< ca cb)
+          true
+          (if (> ca cb)
+            false
+            (less-from a b (+ i (cp-width ca)) (+ j (cp-width cb)))))))))
+
+(defn less? [a :string b :string] :bool
+  (less-from a b 0 0))
+
+(defn all? [] :bool
+  (if (string=? (arg "") "2") (string=? (arg "0") "-a") false))
+
+(defn dir-arg [] :string
+  (if (all?) (arg "1") (arg "0")))
+
+;; The two entries wire 34 never answers, by index. Kept as a function rather
+;; than a collection because the merge below needs them one at a time.
+(defn dot-entry [i :i64] :string
+  (if (= i 0) "." ".."))
+
 (defn hidden? [name :string] :bool
   (if (= (string-byte-length name) 0)
     false
@@ -67,5 +111,48 @@ b" 1 2))
           (if (hidden? name) 0 (do (emit name) (emit (nl)) 0))
           (walk (string-substring rest (+ i 1) (string-byte-length rest))))))))
 
+;; Emit `.` and `..` while they sort before NAME, answering the index reached.
+;; Two elements, so this is a merge with a fixed side rather than a general
+;; one -- and it is a MERGE and not a prepend, which is the whole point:
+;; `-dash` sorts before `.`, measured.
+(defn flush-dots [i :i64 before :string] :i64
+  (if (>= i 2)
+    i
+    (if (less? (dot-entry i) before)
+      (do (emit (dot-entry i)) (emit (nl)) (flush-dots (+ i 1) before))
+      i)))
+
+;; Everything still pending, unconditionally. Used at the end of the listing,
+;; where there is no next name to compare against -- a sentinel string
+;; "greater than every name" would have to be one this reader can spell, and
+;; there is no need for one when the answer is "all of them".
+(defn flush-rest [i :i64] :i64
+  (if (>= i 2)
+    i
+    (do (emit (dot-entry i)) (emit (nl)) (flush-rest (+ i 1)))))
+
+;; The -a walk: the host's listing merged with the two entries it omits.
+(defn walk-all [rest :string dots :i64] :i64
+  (let [i (string-index-of rest "\n")]
+    (if (< i 0)
+      (if (= (string-byte-length rest) 0)
+        (flush-rest dots)
+        (let [name (entry-name rest)
+              d (flush-dots dots name)]
+          (do (emit name) (emit (nl)) (flush-rest d))))
+      (let [name (entry-name (string-substring rest 0 i))
+            d (flush-dots dots name)]
+        (do
+          (emit name)
+          (emit (nl))
+          (walk-all (string-substring rest (+ i 1) (string-byte-length rest)) d))))))
+
 (defn main [] :i64
-  (walk (listing (arg "0"))))
+  (let [text (listing (dir-arg))]
+    (do
+      ;; The walks answer their own bookkeeping -- `walk-all` the merge index
+      ;; it reached -- and that is not an exit status. Measured 2026-09-10:
+      ;; returning it made every -a case produce byte-identical output and
+      ;; exit 2, which a suite comparing only stdout would have called green.
+      (if (all?) (walk-all text 0) (walk text))
+      0)))

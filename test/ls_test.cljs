@@ -77,7 +77,14 @@
 ;;               code point in half when the first character is multi-byte,
 ;;               and the guest listed the ASCII entries and then trapped
 ;;               SIGILL on `é`.
-(def cases [["plain"] ["hidden"] ["onlydot"] ["empty"] ["mixed"] ["sub"]])
+(def cases
+  [["plain"] ["hidden"] ["onlydot"] ["empty"] ["mixed"] ["sub"]
+   ;; -a MERGES `.` and `..` into byte order; it does not prepend them.
+   ;; `mixed` holds `-dash`, and 0x2D sorts BEFORE 0x2E -- so a prepend
+   ;; answers `. .. -dash ...` where ls answers `-dash . .. ...`. That one
+   ;; entry is the whole reason this needs an ordering comparison.
+   ["-a" "plain"] ["-a" "hidden"] ["-a" "onlydot"] ["-a" "empty"]
+   ["-a" "mixed"] ["-a" "sub"]])
 
 (when-not amu-home (refuse "set AMU_HOME to an amu checkout"))
 (let [amu (.join path amu-home "bin" "amu")
@@ -115,7 +122,7 @@
       ;; makes the ceiling below a measurement instead of a claim -- a single
       ;; binary could only show that some size works and some does not, not
       ;; that the bound is the arena and that it moves.
-      (doseq [[out extra] [[exe []]]]
+      (doseq [[out extra] [[exe ["--fuel" "5000000" "--pairs" "200000" "--string-pool" "4000000"]]]]
         (let [p (run "nbb" (into [packager "--code" blob "--offset" offset "--isa" "aarch64"
                                   "--allow" "34,37,38"
                                   "--browse-scope" (.realpathSync fs (.join path tmp "data"))
@@ -125,7 +132,10 @@
     ;; Now the only thing that matters: run it.
     (let [results
           (for [names cases]
-            (let [argv (mapv #(.join path (.realpathSync fs (.join path tmp "data")) %) names)
+            (let [argv (mapv #(if (str/starts-with? % "-")
+                                %
+                                (.join path (.realpathSync fs (.join path tmp "data")) %))
+                             names)
                   k (run exe argv {})
                   ;; LC_ALL=C: the host sorts by bytes, and that is the
                   ;; POSIX locale's order. See the header.
