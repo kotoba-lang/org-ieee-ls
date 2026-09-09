@@ -1,0 +1,71 @@
+;; ls -- POSIX ls (IEEE Std 1003.1) as a Kotoba command, in its default
+;; non-terminal form: one entry per line, sorted, entries beginning with a
+;; period omitted.
+;;
+;; Capabilities: :cli/args (38) for the operand, :fs/browse (34) for the
+;; listing, :io/write (37) to answer. The browse scope is baked into the
+;; packaged binary, so `./ls` lists exactly the tree it was packaged for.
+;;
+;; ## The sort is the host's, and it is bytes
+;;
+;; Wire 34 answers one entry per line as "NAME<TAB>D" -- D is "1" for a
+;; directory -- already sorted, dotfiles included, `.` and `..` excluded.
+;; Measured 2026-09-10, the order is BYTES, and that is the order
+;; `LC_ALL=C /bin/ls` prints. macOS's /bin/ls in a normal locale prints a
+;; different order entirely (locale collation puts a Japanese name first and
+;; `Zebra` last), so this implementation matches the POSIX locale and not the
+;; default one -- the test compares against `LC_ALL=C /bin/ls` and says why.
+(ns ls.core (:export [main]))
+
+(defn arg [i :string] :string
+  (typed-cap-call :cli/args :string :string i))
+
+(defn emit [s :string] :string
+  (typed-cap-call :io/write :string :string s))
+
+(defn listing [dir :string] :string
+  (typed-cap-call :fs/browse :string :string dir))
+
+(defn nl [] :string
+  (string-substring "a
+b" 1 2))
+
+;; The NAME half of one "NAME<TAB>D" line. A line with no separator is
+;; returned whole, which is what the identity stub answers.
+(defn entry-name [line :string] :string
+  (let [i (string-index-of line "\t")]
+    (if (< i 0) line (string-substring line 0 i))))
+
+;; Does NAME begin with a period?
+;;
+;; NOT `(string=? (string-substring name 0 1) ".")`. A substring offset must
+;; be a code-point boundary, and 1 is not one when the first character is
+;; multi-byte -- measured 2026-09-10, that form listed the ASCII entries and
+;; then trapped SIGILL on `é`, so the wrong answer was a truncated listing
+;; and a signal rather than a visibly wrong name.
+;;
+;; `string-index-of` answers the first BYTE OFFSET of the needle, so an
+;; answer of 0 is exactly "begins with", and it never constructs an offset it
+;; has not walked to. A name with no period at all answers -1.
+(defn hidden? [name :string] :bool
+  (if (= (string-byte-length name) 0)
+    false
+    (= (string-index-of name ".") 0)))
+
+;; Walk the listing line by line. The host's order is kept as given: sorting
+;; here would mean re-deriving an order this guest has no primitive for --
+;; there is no string ordering comparison in the language, only `string=?`.
+(defn walk [rest :string] :i64
+  (let [i (string-index-of rest "\n")]
+    (if (< i 0)
+      (if (= (string-byte-length rest) 0)
+        0
+        (let [name (entry-name rest)]
+          (if (hidden? name) 0 (do (emit name) (emit (nl)) 0))))
+      (let [name (entry-name (string-substring rest 0 i))]
+        (do
+          (if (hidden? name) 0 (do (emit name) (emit (nl)) 0))
+          (walk (string-substring rest (+ i 1) (string-byte-length rest))))))))
+
+(defn main [] :i64
+  (walk (listing (arg "0"))))
