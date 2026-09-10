@@ -80,8 +80,24 @@ b" 1 2))
 (defn less? [a :string b :string] :bool
   (less-from a b 0 0))
 
+;; This asked whether the argument COUNT was 2 until 2026-09-10, which was
+;; right only while ls took a single operand: `ls d1 d2` is also two arguments
+;; and would have been read as carrying a `-a`. The question is about argument
+;; 0's shape, so that is what it asks -- the same correction cut's `dashed?`
+;; and uniq's `counted?` needed.
 (defn all? [] :bool
-  (if (string=? (arg "") "2") (string=? (arg "0") "-a") false))
+  (string=? (arg "0") "-a"))
+
+(defn first-operand [] :i64
+  (if (all?) 1 0))
+
+(defn emit-error [s :string] :string
+  (typed-cap-call :io/write-error :string :string s))
+
+(defn exists? [path :string] :bool
+  (string=? (typed-cap-call :fs/app-data :string :string
+                            (string-concat path "EXISTS_SEP"))
+            "1"))
 
 (defn dir-arg [] :string
   (if (all?) (arg "1") (arg "0")))
@@ -147,12 +163,150 @@ b" 1 2))
           (emit (nl))
           (walk-all (string-substring rest (+ i 1) (string-byte-length rest)) d))))))
 
+(defn digit-text [d :i64] :string
+  (string-substring "0123456789" d (+ d 1)))
+
+(defn decimal-of [n :i64] :string
+  (if (< n 10)
+    (digit-text n)
+    (string-concat (decimal-of (quot n 10))
+                   (digit-text (- n (* 10 (quot n 10)))))))
+
+;; --- what KIND of thing is this operand ----------------------------------
+;;
+;; There is no stat form, so a path's kind is read out of its PARENT's
+;; listing, which answers NAME<TAB>D per entry. Same technique org-ieee-cp
+;; uses and org-ieee-find walks with.
+(defn last-slash [p :string from :i64 best :i64] :i64
+  (let [rest (string-substring p from (string-byte-length p))
+        i (string-index-of rest "/")]
+    (if (< i 0)
+      best
+      (last-slash p (+ from (+ i 1)) (+ from i)))))
+
+(defn parent-of [p :string] :string
+  (let [i (last-slash p 0 -1)]
+    (if (< i 0) "." (if (= i 0) "/" (string-substring p 0 i)))))
+
+(defn base-of [p :string] :string
+  (let [i (last-slash p 0 -1)]
+    (if (< i 0) p (string-substring p (+ i 1) (string-byte-length p)))))
+
+(defn line-flag [line :string name :string] :i64
+  (let [t (string-index-of line "\t")]
+    (if (< t 0)
+      -1
+      (if (string=? (string-substring line 0 t) name)
+        (if (string=? (string-substring line (+ t 1) (+ t 2)) "1") 1 0)
+        -1))))
+
+(defn flag-in [rest :string name :string] :i64
+  (let [n (string-byte-length rest)]
+    (if (= n 0)
+      -1
+      (let [i (string-index-of rest "\n")]
+        (if (< i 0)
+          (line-flag rest name)
+          (let [f (line-flag (string-substring rest 0 i) name)]
+            (if (>= f 0) f (flag-in (string-substring rest (+ i 1) n) name))))))))
+
+;; 0 missing, 1 not a directory, 2 a directory.
+(defn kind-of [p :string] :i64
+  (if (exists? p)
+    (if (= (flag-in (listing (parent-of p)) (base-of p)) 1) 2 1)
+    0))
+
+;; --- operands are SORTED, and non-directories come first -----------------
+;;
+;; Measured against /bin/ls 2026-09-10:
+;;
+;;   ls d2 d1        -> d1: ... then d2: ...   the operands are sorted
+;;   ls f.txt d1     -> f.txt, blank, d1: ...  a FILE is listed first, with
+;;                                             no header, whatever the order
+;;
+;; There is no array and no sort primitive, so the order is produced by
+;; repeatedly selecting the smallest operand strictly AFTER the one just
+;; emitted. Ties are broken by argument index, which is what makes a repeated
+;; operand appear twice rather than once -- and the index is all that has to
+;; be carried, since the value is `(arg (decimal-of i))` away.
+(defn after? [a :i64 p :i64] :bool
+  (if (< p 0)
+    true
+    (let [va (arg (decimal-of a))
+          vp (arg (decimal-of p))]
+      (if (less? va vp)
+        false
+        (if (less? vp va) true (> a p))))))
+
+;; The index of the smallest operand of kind K that comes after P, or -1.
+(defn next-of [i :i64 total :string k :i64 p :i64 best :i64] :i64
+  (if (string=? (decimal-of i) total)
+    best
+    (let [path (arg (decimal-of i))]
+      (if (if (= (kind-of path) k) (after? i p) false)
+        (next-of (+ i 1) total k p
+                 (if (< best 0) i (if (after? best i) i best)))
+        (next-of (+ i 1) total k p best)))))
+
+;; --- emitting ------------------------------------------------------------
+(defn body-of [path :string] :i64
+  (if (all?) (walk-all (listing path) 0) (walk (listing path))))
+
+;; Non-directory operands: the name alone, no header. `written` is how many
+;; lines have been produced so far, which decides the blank line.
+(defn each-file [total :string p :i64 written :i64] :i64
+  (let [n (next-of (first-operand) total 1 p -1)]
+    (if (< n 0)
+      written
+      (do (emit (arg (decimal-of n))) (emit (nl))
+          (each-file total n (+ written 1))))))
+
+;; Directory operands: `PATH:` then the listing, with a blank line before
+;; every section except the first thing written.
+(defn each-dir [total :string p :i64 written :i64 header? :i64] :i64
+  (let [n (next-of (first-operand) total 2 p -1)]
+    (if (< n 0)
+      written
+      (do
+        (if (> written 0) (emit (nl)) "")
+        (if (= header? 1)
+          (do (emit (arg (decimal-of n))) (emit ":") (emit (nl)))
+          "")
+        (body-of (arg (decimal-of n)))
+        (each-dir total n (+ written 1) header?)))))
+
+;; Missing operands are reported in ARGUMENT order, before anything is
+;; listed -- measured: `ls d1 nope` writes the diagnostic first and the
+;; listing after, because stdout and stderr are separate streams and ls
+;; checks as it walks its arguments.
+(defn complain-each [i :i64 total :string worst :i64] :i64
+  (if (string=? (decimal-of i) total)
+    worst
+    (let [path (arg (decimal-of i))]
+      (if (= (kind-of path) 0)
+        (do (emit-error "ls: ")
+            (emit-error path)
+            (emit-error ": No such file or directory")
+            (emit-error (nl))
+            (complain-each (+ i 1) total 1))
+        (complain-each (+ i 1) total worst)))))
+
+;; How many operands there are, as a count of the ones of each kind, is not
+;; needed -- what decides whether headers appear is whether MORE THAN ONE
+;; operand exists at all, missing ones included, which is exactly "the second
+;; operand index is not the end".
+(defn several? [total :string] :i64
+  (if (string=? (decimal-of (+ (first-operand) 1)) total) 0 1))
+
 (defn main [] :i64
-  (let [text (listing (dir-arg))]
-    (do
-      ;; The walks answer their own bookkeeping -- `walk-all` the merge index
-      ;; it reached -- and that is not an exit status. Measured 2026-09-10:
-      ;; returning it made every -a case produce byte-identical output and
-      ;; exit 2, which a suite comparing only stdout would have called green.
-      (if (all?) (walk-all text 0) (walk text))
-      0)))
+  (let [total (arg "")
+        start (first-operand)]
+    (if (string=? (decimal-of start) total)
+      ;; No operand at all. POSIX lists the working directory; there is no
+      ;; cwd capability, so this refuses rather than listing something else.
+      1
+      (let [failed (complain-each start total 0)
+            files (each-file total -1 0)]
+        (do
+          (each-dir total -1 files (several? total))
+          failed)))))

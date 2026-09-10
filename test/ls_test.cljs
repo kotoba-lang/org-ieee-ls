@@ -84,7 +84,22 @@
    ;; answers `. .. -dash ...` where ls answers `-dash . .. ...`. That one
    ;; entry is the whole reason this needs an ordering comparison.
    ["-a" "plain"] ["-a" "hidden"] ["-a" "onlydot"] ["-a" "empty"]
-   ["-a" "mixed"] ["-a" "sub"]])
+   ["-a" "mixed"] ["-a" "sub"]
+   ;; --- two or more operands ------------------------------------------
+   ;; Directory operands get a `PATH:` header and a blank line between
+   ;; sections; a single operand gets neither.
+   ["plain" "hidden"] ["-a" "plain" "hidden"]
+   ;; The operands are SORTED, so giving them in reverse order must produce
+   ;; the same output as giving them in order. An implementation that walked
+   ;; argv in order passes the first of these and fails the second.
+   ["hidden" "plain"] ["empty" "plain" "hidden"]
+   ;; The same operand twice appears TWICE -- the tie-break is the argument
+   ;; index, so a selection that compared values alone would emit it once.
+   ["plain" "plain"]
+   ;; A missing operand is reported and the rest are still listed, exit 1.
+   ["plain" "nope"] ["nope" "plain"]
+   ;; Every operand missing: nothing on stdout, exit 1.
+   ["nope" "alsonope"]])
 
 (when-not amu-home (refuse "set AMU_HOME to an amu checkout"))
 (let [amu (.join path amu-home "bin" "amu")
@@ -99,7 +114,7 @@
         blob (.join path tmp "ls.bin")
         exe (.join path tmp "ls")
         exe-big (.join path tmp "ls-big")]
-    (.writeFileSync fs policy "{:allow #{[:cap/call 34] [:cap/call 37] [:cap/call 38]}}" "utf8")
+    (.writeFileSync fs policy "{:allow #{[:cap/call 34] [:cap/call 35] [:cap/call 37] [:cap/call 38] [:cap/call 39]}}" "utf8")
     ;; The fixtures live in the tree the binary is packaged for. The native
     ;; loader refuses a relative request outright, so operands are absolute.
     (let [data (.join path tmp "data")]
@@ -124,7 +139,12 @@
       ;; that the bound is the arena and that it moves.
       (doseq [[out extra] [[exe ["--fuel" "5000000" "--pairs" "200000" "--string-pool" "4000000"]]]]
         (let [p (run "nbb" (into [packager "--code" blob "--offset" offset "--isa" "aarch64"
-                                  "--allow" "34,37,38"
+                                  "--allow" "34,35,37,38,39"
+                                  ;; EXISTS (wire 35) answers under the FS scope, not
+                                  ;; the browse scope, so both are granted -- ls needs
+                                  ;; browse to list a directory and exists to tell a
+                                  ;; missing operand from a present one.
+                                  "--fs-scope" (.realpathSync fs (.join path tmp "data"))
                                   "--browse-scope" (.realpathSync fs (.join path tmp "data"))
                                   "--output" out]
                                  extra) {})]

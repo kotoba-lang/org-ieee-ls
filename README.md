@@ -87,8 +87,46 @@ comparing only stdout would have called all six green.
 baked into the packaged binary, so `./ls` lists exactly the tree it was
 packaged for and the caller cannot widen it.
 
+## Several operands are SORTED, and a file comes before a directory
+
+Measured against `/bin/ls` 2026-09-10:
+
+```
+ls d2 d1      ->  d1: … then d2: …      the operands are sorted
+ls f.txt d1   ->  f.txt, blank, d1: …   a non-directory is listed first,
+                                        with no header, whatever the order
+```
+
+Directory operands get a `PATH:` header and a blank line between sections; a
+single operand gets neither.
+
+### No array, no sort primitive
+
+The order is produced by repeatedly selecting the smallest operand strictly
+**after** the one just emitted, with ties broken by **argument index**. Only
+the index has to be carried, since the value is `(arg (decimal-of i))` away.
+
+Both halves of that are held down by a control:
+
+- walking argv in order instead of sorting fails **3** cases — and correctly
+  leaves `hidden plain` passing, since there the two orders coincide
+- comparing values without the index tie-break fails exactly **1**,
+  `plain plain`, because a repeated operand is emitted once instead of twice
+
+### A path's kind comes from its parent
+
+There is no stat form, so whether an operand is a directory is read out of
+its **parent's** listing, which answers `NAME<TAB>D`. Same technique
+[`org-ieee-cp`](https://github.com/kotoba-lang/org-ieee-cp) uses and
+[`org-ieee-find`](https://github.com/kotoba-lang/org-ieee-find) walks with.
+
+That is why this grants `:fs/app-data` (35) as well as `:fs/browse` (34): the
+EXISTS form tells a missing operand from a present one, and it answers under
+the **fs** scope rather than the browse scope, so both are packaged.
+
 ## What this is not
 
-No `-l`, `-1`, `-R`, `-t`, `-r`, `-d`, `-F`. No multiple operands, and no
-column output: `/bin/ls` prints one per line when stdout is not a terminal,
-which is the form this matches.
+No `-l`, `-1`, `-R`, `-t`, `-r`, `-d`, `-F`, and no column output: `/bin/ls`
+prints one per line when stdout is not a terminal, which is the form this
+matches. With no operand at all this exits 1 rather than listing something
+else — POSIX lists the working directory and there is no cwd capability.
