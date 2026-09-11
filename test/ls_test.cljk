@@ -1,4 +1,4 @@
-;; test/ls_test.cljs — build the command and compare it with the system
+;; test/ls_test.cljk — build the command and compare it with the system
 ;; cat, byte for byte.
 ;;
 ;; This does not assert that the guest COMPILES. It compiles it, packages it
