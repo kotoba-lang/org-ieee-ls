@@ -27,7 +27,7 @@ with this implementation, and the test says so where it sets `LC_ALL`.
 
 ## Measured against the system utility
 
-`test/ls_test.cljs` compiles the guest, packages it into a standalone binary,
+`test/ls_test.cljk` compiles the guest, packages it into a standalone binary,
 **runs that binary**, and compares bytes and exit status. Twelve cases over
 six directories, all identical: a plain one, one with a dotfile, one whose
 **only** entry is hidden (which prints nothing, not an empty line), an empty
