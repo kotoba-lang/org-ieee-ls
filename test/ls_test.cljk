@@ -103,7 +103,11 @@
 
 (when-not amu-home (refuse "set AMU_HOME to an amu checkout"))
 (let [amu (.join path amu-home "bin" "amu")
-      packager (.join path amu-home "scripts" "package-command.cljs")]
+      ;; `.cljk`, run through amu's own kbb: the `.cljs` spelling this named
+      ;; until 2026-09-15 no longer exists (the cljk rename), so the suite
+      ;; could not have run since.
+      packager (.join path amu-home "scripts" "package-command.cljk")
+      kbb (.join path amu-home "bin" "kbb")]
   (when-not (.existsSync fs amu) (refuse (str "no amu at " amu)))
   (when-not (.existsSync fs packager) (refuse (str "no packager at " packager)))
   (when-not (.existsSync fs system-ls) (refuse (str "no " system-ls " to compare against")))
@@ -138,7 +142,7 @@
       ;; binary could only show that some size works and some does not, not
       ;; that the bound is the arena and that it moves.
       (doseq [[out extra] [[exe ["--fuel" "5000000" "--pairs" "200000" "--string-pool" "4000000"]]]]
-        (let [p (run "nbb" (into [packager "--code" blob "--offset" offset "--isa" "aarch64"
+        (let [p (run "node" (into [kbb "--backend" "sci" packager "--code" blob "--offset" offset "--isa" "aarch64"
                                   "--allow" "34,35,37,38,39"
                                   ;; EXISTS (wire 35) answers under the FS scope, not
                                   ;; the browse scope, so both are granted -- ls needs
